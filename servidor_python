@@ -1,0 +1,146 @@
+from flask import Flask, request, jsonify, render_template, make_response
+import psycopg2  # Usar psycopg2 para PostgreSQL
+from psycopg2 import sql, Error
+from datetime import datetime
+import pytz
+import os  # Para acceder a variables de entorno
+
+app = Flask(__name__)
+
+# Obtener la URL de la base de datos desde las variables de entorno
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+# Función para conectarse a la base de datos
+def get_db_connection():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Error as e:
+        print(f"Error al conectar a la base de datos: {e}")
+        return None
+
+# Ruta para mostrar la página principal (interfaz web)
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# Ruta para recibir los datos de la ESP32
+@app.route('/datos', methods=['POST'])
+def recibir_datos():
+    try:
+        # Recibir datos del sensor en formato JSON
+        data = request.json
+        voltaje = data.get('voltaje')
+        corriente = data.get('corriente')
+        potencia = data.get('potencia')
+        energia = data.get('energia')
+        frecuencia = data.get('frecuencia')
+        pf = data.get('pf')
+
+        # Insertar los datos en la base de datos
+        insertar_datos(voltaje, corriente, potencia, energia, frecuencia, pf)
+
+        return jsonify({"message": "Datos recibidos correctamente"}), 200
+    except Exception as e:
+        print(f"Error al recibir los datos: {e}")
+        return jsonify({"message": "Error al recibir los datos"}), 500
+
+# Función para insertar los datos en la base de datos
+def insertar_datos(voltaje, corriente, potencia, energia, frecuencia, pf):
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            raise Exception("No se pudo conectar a la base de datos")
+
+        c = conn.cursor()
+
+        # Crear la tabla si no existe
+        c.execute('''CREATE TABLE IF NOT EXISTS datos (
+                        id SERIAL PRIMARY KEY,
+                        voltaje REAL,
+                        corriente REAL,
+                        potencia REAL,
+                        energia REAL,
+                        frecuencia REAL,
+                        pf REAL,
+                        timestamp TIMESTAMP
+                    )''')
+
+        # Obtener el tiempo actual en la zona horaria especificada
+        time_zone = pytz.timezone('America/Santiago')
+        time_now = datetime.now(time_zone)
+
+        # Insertar los datos
+        query = '''INSERT INTO datos (voltaje, corriente, potencia, energia, frecuencia, pf, timestamp)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)'''
+        values = (voltaje, corriente, potencia, energia, frecuencia, pf, time_now)
+
+        c.execute(query, values)
+        conn.commit()
+        conn.close()
+
+        print("Datos insertados correctamente")
+    except Error as e:
+        print(f"Error al insertar datos: {e}")
+
+# Ruta para ver las últimas 10 lecturas almacenadas
+@app.route('/ultimas_lecturas', methods=['GET'])
+def ultimas_lecturas():
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            raise Exception("No se pudo conectar a la base de datos")
+
+        c = conn.cursor()
+        c.execute("SELECT voltaje, corriente, potencia, energia, frecuencia, pf, timestamp FROM datos ORDER BY id DESC LIMIT 10")
+        rows = c.fetchall()
+        conn.close()
+
+        # Formatear los datos para enviarlos como respuesta JSON
+        ultimas_lecturas = {
+            'labels': [row[6].strftime('%Y-%m-%d %H:%M:%S') for row in rows],
+            'voltaje': [row[0] for row in rows],
+            'corriente': [row[1] for row in rows],
+            'potencia': [row[2] for row in rows],
+            'energia': [row[3] for row in rows],
+            'frecuencia': [row[4] for row in rows],
+            'pf': [row[5] for row in rows]
+        }
+
+        return jsonify(ultimas_lecturas), 200
+    except Exception as e:
+        print(f"Error al obtener las últimas lecturas: {e}")
+        return jsonify({"message": "Error al obtener las últimas lecturas"}), 500
+
+# Función para descargar la base de datos en formato CSV
+@app.route('/descargar_csv', methods=['GET'])
+def descargar_csv():
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            raise Exception("No se pudo conectar a la base de datos")
+
+        c = conn.cursor()
+        c.execute("SELECT id, voltaje, corriente, potencia, energia, frecuencia, pf, timestamp FROM datos ORDER BY id DESC")
+        rows = c.fetchall()
+        conn.close()
+
+        # Crear el archivo CSV en memoria
+        output = []
+        output.append(['ID', 'Voltaje (V)', 'Corriente (A)', 'Potencia (W)', 'Energía (kWh)', 'Frecuencia (Hz)', 'Factor de Potencia', 'Fecha y Hora'])
+
+        for row in rows:
+            output.append(row)
+
+        # Crear una respuesta HTTP con el archivo CSV
+        si = "\n".join([",".join(map(str, row)) for row in output])
+        response = make_response(si)
+        response.headers["Content-Disposition"] = "attachment; filename=datos_sensores.csv"
+        response.headers["Content-type"] = "text/csv"
+        return response
+    except Exception as e:
+        print(f"Error al generar CSV: {e}")
+        return jsonify({"message": "Error al generar CSV"}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
